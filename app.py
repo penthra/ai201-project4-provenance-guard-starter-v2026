@@ -31,6 +31,8 @@ from flask import Flask, jsonify, request
 import audit
 import config
 import detector
+import scoring
+import stylometry
 
 app = Flask(__name__)
 
@@ -230,18 +232,18 @@ def submit():
         ), 503
 
     content_id = str(uuid.uuid4())
-    # Placeholders until the second signal and label mapping are connected.
+    style_score = stylometry.style_signal(text)
+    confidence = scoring.combine_signals(model_score, style_score)
+    # Guess and reader-facing label remain placeholders until Milestone 5.
     guess = "unsure"
-    confidence = 0.5
-    label = "Placeholder: the model signal is available, but no final label has been assigned."
-    style_score = None
+    label = "Placeholder: both signals are available, but no final label has been assigned."
     audit.log_decision(
         content_id=content_id,
         creator_id=creator_id,
         guess=guess,
         model_score=model_score,
         style_score=style_score,
-        combined_score=None,
+        combined_score=confidence,
         label=label,
         status="decided",
     )

@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Plain conventional prose",
+    "text": "Every morning I get up and make breakfast. Then I go to work and talk to the people in my office. At the end of the day I come home and make dinner. Sometimes I watch television before I go to bed.",
+    "model_score": 0.9404,
+    "style_score": 0.5295,
+    "absolute_gap": 0.4109,
+    "equal_weight_average": 0.7349
+  },
+  {
+    "name": "Varied narrative",
+    "text": "Stop! The bus lurched past my corner while I wrestled a dripping umbrella into its sleeve, one shoe planted in yesterday's muddy pothole. Perfect timing. Somewhere behind me, a kid laughed; I nearly did too.",
+    "model_score": 0.2297,
+    "style_score": 0.0286,
+    "absolute_gap": 0.2011,
+    "equal_weight_average": 0.1291
+  },
+  {
+    "name": "Repeated unusual vocabulary",
+    "text": "The xylophonic zephyr perplexes the quincunx. The quincuncial zephyr perplexes the syzygy. The syzygetic zephyr perplexes the xylophone. The xylophonic zephyr perplexes the quincunx.",
+    "model_score": 0.8935,
+    "style_score": 0.8125,
+    "absolute_gap": 0.081,
+    "equal_weight_average": 0.853
+  }
+]

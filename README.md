@@ -82,7 +82,7 @@ The planned raw style measurements are:
 - **Type-token ratio:** distinct lowercase words divided by total words, using the provided word splitter. For example, “Cats chase cats” gives 2/3. Longer texts tend to repeat more words, so length affects this measure independently of authorship.
 - **Punctuation density:** occurrences of `. , ! ? ; : - — ( )` divided by total words, with each punctuation character counted once. Return 0 if there are no words. This measures punctuation amount, not punctuation variety.
 
-These raw measurements must be scaled before producing `style_score`. Low sentence-length spread and low vocabulary variety are possible AI-like clues. Punctuation has no assumed direction until calibration. The exact style-score scaling will be decided in Milestone 4.
+The standalone style signal in `stylometry.py::style_signal` now uses `0.5 * (1 - min(sentence_length_spread, 1)) + 0.5 * (1 - type_token_ratio)`, rounded to four decimal places. Low spread and repeated vocabulary raise the score. With fewer than two word-bearing sentences, the spread component is neutral at 0.5; text without words returns an overall 0.5. Punctuation density is reported for calibration but has no scoring weight because its direction has not been established. These are starting heuristics, not calibrated authorship probabilities. The style signal is now connected to `/submit`; both raw signal scores and the combined score are returned and logged.
 
 The model has another blind spot: it examines only the initial token window, currently 400 tokens in `config.py`. It cannot see authorship changes beyond that window. AI text with unusual vocabulary may also score as human-like because it is hard to predict.
 
@@ -91,16 +91,48 @@ The model has another blind spot: it examines only the initial token window, cur
 <!-- Write the rule in words, then give the numbers. What happens when the two
      signals disagree? -->
 
-**The rule:** My proposed starting rule is an equal-weight average. Both signals point in the same direction: higher means more AI-like. Strong disagreement moves the average toward unsure. Neither signal directly observes authorship.
+**The rule:** My combining rule is an equal-weight average: neither signal takes priority. Both signals point in the same direction, with higher scores meaning more AI-like. There is no separate disagreement override: opposite scores such as 0.90 and 0.10 average to 0.50, inside the unsure band. Neither signal directly observes authorship.
 
-**The numbers:** `combined_score = 0.5 * model_score + 0.5 * style_score`. Proposed label boundaries: human at or below 0.20, unsure above 0.20 and below 0.80, and AI at or above 0.80. These are starting choices to test, not calibrated settings. The Python files still contain starter settings.
+**The numbers:** `combined_score = 0.5 * model_score + 0.5 * style_score`. In `config.py`, `WEIGHT_MODEL_SIGNAL = 0.5` and `WEIGHT_STYLE_SIGNAL = 0.5`; the weights sum to 1, so the result stays between the two input scores. Label boundaries are `HUMAN_THRESHOLD = 0.20` and `AI_THRESHOLD = 0.80`: human at or below 0.20, unsure above 0.20 and below 0.80, and AI at or above 0.80. Equal weights are a starting choice because neither signal has been shown more reliable on a labeled dataset. The wider unsure band is intended to reduce accusations, accepting more uncertain results. These settings are not calibrated probabilities.
 
 **Where it lives:** `scoring.py::combine_signals`
 
 <!-- ⚠️ The grader checks your code against that line. If your rule lives
      somewhere else, say where. -->
 
-**A case where my two signals split, and what my rule does with it:** Hypothetically, a model score of 0.90 and a style score of 0.10 produce 0.50, so the label is unsure. This illustrates disagreement; a real measured example will be added after implementation.
+**A case where my two signals split, and what my rule does with it:** In the measured plain-conventional-prose test below, the model returned 0.9404 while style returned 0.5295, a gap of 0.4109. The predictable everyday wording pushed the model score high, while the style measurements provided a weaker AI-like signal. The equal-weight rule produces 0.7349. Under the configured 0.20/0.80 boundaries this is unsure; under the previous starter 0.35/0.65 boundaries it would be AI. Averaging reduces the influence of the high model score, but avoiding an accusation here also depends on the label boundaries. Neither score proves authorship.
+
+### Measured comparison of both signals
+
+Ran `python compare_signals.py` on October 30, 2026 using the Windows virtual environment and the real local detector. Each row uses exactly the same text for both signals. All three passages are synthetic style probes written for this test, not verified human-writing examples, so these results do not measure false positives or detection accuracy. Full passages and results are in [results/signal_comparison.json](results/signal_comparison.json).
+
+| Test piece | Model score | Style score | Absolute gap | Equal-weight average | Comparison |
+|---|---:|---:|---:|---:|---|
+| Plain conventional prose | 0.9404 | 0.5295 | 0.4109 | 0.7349 | Split in strength: model high, style near the midpoint. |
+| Varied narrative | 0.2297 | 0.0286 | 0.2011 | 0.1291 | Both low, toward human-like. |
+| Repeated unusual vocabulary | 0.8935 | 0.8125 | 0.0810 | 0.8530 | Both high, toward AI-like. |
+
+Higher values mean more AI-like for both signals. The averages above were computed by the original comparison script. `/submit` now computes both signals and calls `scoring.py::combine_signals`.
+
+
+### Four-input calibration with audit verification
+
+Ran `python calibrate_signals.py` on October 30, 2026 using the real local model and the Windows virtual environment. The script sends each input through `/submit`, prints both signals separately, and checks that the matching decision is readable through `/log`. Full texts, provenance, content IDs, and responses are saved in [results/calibration_signals.json](results/calibration_signals.json). Re-running the script appends four new decisions to `logs/audit.jsonl`.
+
+| Input | Model score | Style score | Combined score | Diagnostic mapped guess |
+|---|---:|---:|---:|---|
+| Clearly AI: assistant-generated study advice | 0.7132 | 0.5146 | 0.6139 | unsure |
+| Clearly human: Mark Twain narrative excerpt | 0.5516 | 0.5957 | 0.5736 | unsure |
+| Formal human: Lincoln speech excerpt | 0.3267 | 0.3799 | 0.3533 | unsure |
+| Lightly-edited AI: edited study advice | 0.6436 | 0.3934 | 0.5185 | unsure |
+
+**Input provenance:** The human narrative is the opening four sentences of Chapter II of [Mark Twain's The Adventures of Tom Sawyer](https://www.gutenberg.org/files/74/74-h/74-h.htm). The formal human sample is the opening three sentences of [Lincoln's Second Inaugural Address](https://www.nps.gov/linc/learn/historyculture/lincoln-second-inaugural.htm). Both are public-domain human writing, but historical texts may have appeared in the model's training data and do not represent today's student writing. The AI passage was generated by the assistant for this test. The edited version changes “clear” to “simple,” replaces one sentence with a shorter version, and adds a personal aside. The assistant made these edits; this simulates light editing rather than testing a human editor.
+
+**What surprised me:** The known-human Twain excerpt scored 0.5736, slightly above the midpoint. Both signals contributed: model 0.5516 and style 0.5957. Regular sentence lengths and repeated vocabulary can push the style heuristic upward even for genuine human writing. The formal-human sample scored lower on both signals (0.3267 and 0.3799), so formality alone did not cause an AI-like result in this case. These observations concern these excerpts only.
+
+**Why edited AI matters:** Editing lowered the model score by 0.0696 and the style score by 0.1212, reducing the combined score from 0.6139 to 0.5185. The style signal was more sensitive to these changes: splitting a sentence changes length variation, and an added aside changes vocabulary variety. The known AI origin did not change. The broad unsure band avoids firm accusations for these human samples, but also leaves both known-AI examples unsure. Four samples do not establish accuracy.
+
+**Logging:** Each successful submission now records `model_score`, `style_score`, and `combined_score` through `audit.log_decision(...)`, along with its timestamp, content ID, creator ID, guess, label, and status. The response carries both signal scores and the combined score as `confidence`. All four records were read back and matched to their responses. The route's `guess` and reader-facing `label` remain placeholders for Milestone 5; the mapped guesses in this table were computed separately for diagnosis.
 
 
 
@@ -137,7 +169,7 @@ Because 0.85 exceeds the proposed 0.80 boundary, the writer receives `guess: "ai
 
 The service logs the original decision with status `decided` and returns its `content_id`. The writer sends that ID and an explanation to `POST /appeal`, such as: “I wrote this myself. I used simple sentences because I am still learning English.” The route verifies the submission exists, records the appeal, and changes the item's latest status to `under_review`. The original decision remains in the audit log.
 
-The response confirms the appeal was recorded. It does not automatically clear the writer or promise a completed review; a process to resolve reviews still needs to be defined. Raising the AI boundary from the starter 0.65 to the proposed 0.80 places scores such as 0.70 in unsure, but does not prevent this 0.85 mistake. I accept more uncertain results to reduce accusations and will test the boundaries on genuine human writing during calibration.
+The response confirms the appeal was recorded. It does not automatically clear the writer or promise a completed review; a process to resolve reviews still needs to be defined. Raising the AI boundary from the starter 0.65 to the configured 0.80 places scores such as 0.70 in unsure, but does not prevent this 0.85 mistake. I accept more uncertain results to reduce accusations and will test the boundaries on genuine human writing during calibration.
 
 ## Endpoint Contracts
 
