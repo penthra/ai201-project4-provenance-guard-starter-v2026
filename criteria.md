@@ -45,11 +45,11 @@ Two things worth knowing before you pick numbers:
 ## 1.
 
 <!-- Your criterion. It must name a number. -->
-
+No more than 3 out of 10 human-written samples should be labeled AI-generated.
 
 
 **Why this target:**
-
+This allows some mistakes while still expecting most human writing to be classified correctly.
 
 
 ---
@@ -57,11 +57,11 @@ Two things worth knowing before you pick numbers:
 ## 2.
 
 <!-- Your criterion. -->
-
+The average score for 5 clearly AI-generated samples should be at least 0.15 higher than for 5 clearly human-written samples on a 0–1 scale.
 
 
 **Why this target:**
-
+This shows a noticeable difference without requiring perfect separation.
 
 
 ---
@@ -74,18 +74,18 @@ Two things worth knowing before you pick numbers:
 
 **Why this target:**
 
-
+Each of the three labels should appear at least once when testing 15 varied samples.
 
 ---
 
 ## 4.
 
 <!-- Your criterion. -->
-
+At least 4 out of 5 valid appeals should update the review status and create a saved appeal record.
 
 
 **Why this target:**
-
+This is a basic prototype target that allows one failure while checking that the appeal feature usually works.
 
 
 ---
@@ -93,12 +93,12 @@ Two things worth knowing before you pick numbers:
 ## 5.
 
 <!-- Your criterion. -->
-
+At least 3 out of 4 tests—missing text, empty text, whitespace-only text, and text above the documented size limit—should return a clear error without crashing.
 
 
 **Why this target:**
 
-
+This checks basic input protection while leaving room to improve one case.
 
 ---
 

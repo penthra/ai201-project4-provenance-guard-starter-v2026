@@ -39,6 +39,15 @@
 <!-- The path a submission takes, from arriving to the label a reader sees.
      Six or seven steps — this is the trace you wrote in Milestone 1. -->
 
+This describes planned behavior, not a completed implementation. Scores below are hypothetical, not test results.
+
+1. The writer sends `text` and `creator_id` as JSON to `POST /submit` in `app.py`. This gives the service the writing and identifies the submitting creator.
+2. The route validates the input and assigns a unique `content_id` to a valid submission. Validation rejects unsuitable requests; the ID connects this particular decision to a later appeal.
+3. `detector.model_signal(text)` measures predictability with a local language model. It adds `model_score`, from 0 to 1, with higher values meaning more AI-like.
+4. `stylometry.style_signal(text)` measures sentence-length variation, vocabulary variety, and punctuation density. It adds a separate `style_score`, also from 0 to 1 with higher values meaning more AI-like.
+5. `scoring.combine_signals(model_score, style_score)` combines the signals into one score using the proposed equal weights below.
+6. `scoring.score_to_label(score)` maps that score to `human`, `unsure`, or `ai` and adds the full message a reader sees.
+7. `audit.log_decision(...)` saves the IDs, both signal scores, combined score, guess, label, and status. The route returns the ID, scores, guess, and label as JSON so the caller can display the result.
 
 
 ---
@@ -53,35 +62,45 @@
 
 ### Signal one — the model signal
 
-**What it measures:**
+**What it measures:** How predictable the text is to the local language model, measured using perplexity.
 
-**Why that might differ between human and AI writing:**
+**Why that might differ between human and AI writing:**AI writing may contain more predictable word sequences. Human writing may contain unexpected choices.
 
-**What it can't see:**
+**What it can't see:**Actual authorship. A real person writing simple, ordinary sentences can look predictable too.
 
 ### Signal two — the style signal
 
-**What it measures:**
+**What it measures:**how much sentence lengths vary, the number of unique words divided by the total number of words, and the amount of punctuation relative to text length.
 
-**Why that might differ between human and AI writing:**
+**Why that might differ between human and AI writing:**AI-generated writing may have more consistent sentence lengths and repeated vocabulary. Human writing may vary more in sentence length, word choice, and punctuation. These are tendencies, so they do not prove who wrote the text.
 
-**What it can't see:**
+**What it can't see:**This signal cannot understand the text’s meaning or identify its author. Someone can change its score by adding typos, splitting sentences, or changing punctuation. Human writing can also have a regular style and be incorrectly flagged.
+
+The planned raw style measurements are:
+
+- **Sentence-length spread:** standard deviation of sentence word counts divided by their mean. Low values mean similar sentence lengths. With fewer than two sentences or no words, return 0 for this raw measure; this is insufficient evidence of variation, not proof of AI authorship.
+- **Type-token ratio:** distinct lowercase words divided by total words, using the provided word splitter. For example, “Cats chase cats” gives 2/3. Longer texts tend to repeat more words, so length affects this measure independently of authorship.
+- **Punctuation density:** occurrences of `. , ! ? ; : - — ( )` divided by total words, with each punctuation character counted once. Return 0 if there are no words. This measures punctuation amount, not punctuation variety.
+
+These raw measurements must be scaled before producing `style_score`. Low sentence-length spread and low vocabulary variety are possible AI-like clues. Punctuation has no assumed direction until calibration. The exact style-score scaling will be decided in Milestone 4.
+
+The model has another blind spot: it examines only the initial token window, currently 400 tokens in `config.py`. It cannot see authorship changes beyond that window. AI text with unusual vocabulary may also score as human-like because it is hard to predict.
 
 ### The combining rule
 
 <!-- Write the rule in words, then give the numbers. What happens when the two
      signals disagree? -->
 
-**The rule:**
+**The rule:** My proposed starting rule is an equal-weight average. Both signals point in the same direction: higher means more AI-like. Strong disagreement moves the average toward unsure. Neither signal directly observes authorship.
 
-**The numbers:**
+**The numbers:** `combined_score = 0.5 * model_score + 0.5 * style_score`. Proposed label boundaries: human at or below 0.20, unsure above 0.20 and below 0.80, and AI at or above 0.80. These are starting choices to test, not calibrated settings. The Python files still contain starter settings.
 
 **Where it lives:** `scoring.py::combine_signals`
 
 <!-- ⚠️ The grader checks your code against that line. If your rule lives
      somewhere else, say where. -->
 
-**A case where my two signals split, and what my rule does with it:**
+**A case where my two signals split, and what my rule does with it:** Hypothetically, a model score of 0.90 and a style score of 0.10 produce 0.50, so the label is unsure. This illustrates disagreement; a real measured example will be added after implementation.
 
 
 
@@ -96,15 +115,93 @@
 
 | Label | Score range | The exact text a reader sees |
 |---|---|---|
-| high-confidence human |  |  |
-| unsure |  |  |
-| high-confidence AI |  |  |
+| high-confidence human | `0.00 <= score <= 0.20` | Our checks suggest this text was written by a person. This is an automated estimate. |
+| unsure | `0.20 < score < 0.80` | Our checks cannot reliably determine how this text was written. |
+| high-confidence AI | `0.80 <= score <= 1.00` | Our checks suggest this text may be AI-generated. This can be wrong. You can request a review. |
 
 **Why I worded the "unsure" one this way:**
 <!-- It's the hardest of the three. It has to admit uncertainty without
      sounding like an accusation, because the person reading it may well have
      written every word themselves. -->
 
+
+The unsure message describes the limits of the checks without accusing the writer. A wide unsure band aims to reduce false accusations, accepting that more AI writing may receive an unsure result. These are proposed ranges and messages, not implemented behavior.
+
+### False-positive scenario
+
+A student writing in a second language submits a paragraph they wrote themselves. They use familiar vocabulary and sentences of similar lengths. The model finds the wording predictable, and the style signal treats the regular structure and repetition as AI-like.
+
+Suppose the hypothetical scores are `model_score = 0.90` and `style_score = 0.80`. The combined score is `(0.5 * 0.90) + (0.5 * 0.80) = 0.85`. This is an invented example, not a measured result or an 85% verified probability of AI authorship.
+
+Because 0.85 exceeds the proposed 0.80 boundary, the writer receives `guess: "ai"` and: “Our checks suggest this text may be AI-generated. This can be wrong. You can request a review.” This is a false positive: real human writing triggered patterns the system associates with AI.
+
+The service logs the original decision with status `decided` and returns its `content_id`. The writer sends that ID and an explanation to `POST /appeal`, such as: “I wrote this myself. I used simple sentences because I am still learning English.” The route verifies the submission exists, records the appeal, and changes the item's latest status to `under_review`. The original decision remains in the audit log.
+
+The response confirms the appeal was recorded. It does not automatically clear the writer or promise a completed review; a process to resolve reviews still needs to be defined. Raising the AI boundary from the starter 0.65 to the proposed 0.80 places scores such as 0.70 in unsure, but does not prevent this 0.85 mistake. I accept more uncertain results to reduce accusations and will test the boundaries on genuine human writing during calibration.
+
+## Endpoint Contracts
+
+These describe the planned implementation. Both endpoints accept a JSON object with `Content-Type: application/json` and return JSON. Unknown request fields are ignored. Required strings are trimmed before validation and use. Lengths count Python string characters after trimming, not bytes.
+
+### POST /submit
+
+**Request**
+
+| Field | Type | Required | Validation and meaning |
+|---|---|---|---|
+| `text` | string | Yes | 20–10,000 characters and at least three model tokens. The writing to check. The model uses its configured initial token window; the style signal uses the full accepted text. |
+| `creator_id` | string | Yes | 1–100 characters. Identifies the submitting creator; this does not authenticate them. |
+
+**Success: HTTP 200**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `content_id` | string | A new UUID identifying this submission. Resubmitting identical text creates a new ID. |
+| `guess` | string | Exactly `human`, `unsure`, or `ai`, using the ranges in Label Variants. |
+| `confidence` | number | Combined AI-likeness score from 0 to 1. Higher means more AI-like, not greater certainty in whichever label was selected. This is not a calibrated probability of authorship. |
+| `label` | string | The exact reader-facing message from Label Variants. |
+| `model_score` | number | Model AI-likeness score from 0 to 1. |
+| `style_score` | number | Style AI-likeness score from 0 to 1. |
+
+The decision is logged with status `decided`. The response's `confidence` value is stored as `combined_score` in the audit log.
+
+### POST /appeal
+
+**Request**
+
+| Field | Type | Required | Validation and meaning |
+|---|---|---|---|
+| `content_id` | string | Yes | A non-empty ID matching an existing submission, exactly after trimming. |
+| `reasoning` | string | Yes | 1–5,000 characters explaining why the writer disputes the decision. |
+
+**Success: HTTP 200**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `content_id` | string | The submission ID supplied in the request. |
+| `status` | string | Always `under_review`. |
+| `message` | string | Always “Your appeal has been recorded for review.” |
+
+Any existing submission may be appealed, regardless of its original guess. A repeated valid appeal adds another appeal entry and returns HTTP 200. The creator ID is looked up from the original decision. This starter design does not authenticate the appellant. Appeals preserve the original decision and do not automatically rescore the text.
+
+### Errors
+
+| HTTP status | `error` value | When returned |
+|---|---|---|
+| 400 | `invalid_input` | Body is not a JSON object, fields are missing, types or lengths are invalid, or submission text has fewer than three model tokens. |
+| 404 | `not_found` | An otherwise valid appeal names an ID with no original submission. |
+| 503 | `detector_unavailable` | A valid submission cannot be scored because the local model cannot load. No successful decision is recorded. |
+
+Error responses contain exactly two string fields: `error`, the code above, and `message`, a readable explanation. Validate request fields before model scoring or appeal lookup. For example:
+
+```json
+{
+  "error": "invalid_input",
+  "message": "The text field must be a string between 20 and 10000 characters after trimming."
+}
+```
+
+Rate limiting belongs to a later unit and remains disabled for this design.
 
 
 ---
