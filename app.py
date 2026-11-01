@@ -234,9 +234,7 @@ def submit():
     content_id = str(uuid.uuid4())
     style_score = stylometry.style_signal(text)
     confidence = scoring.combine_signals(model_score, style_score)
-    # Guess and reader-facing label remain placeholders until Milestone 5.
-    guess = "unsure"
-    label = "Placeholder: both signals are available, but no final label has been assigned."
+    guess, label = scoring.score_to_label(confidence)
     audit.log_decision(
         content_id=content_id,
         creator_id=creator_id,
@@ -277,14 +275,42 @@ def appeal():
     to the person on the other end. It's the only thing standing between a
     wrong accusation and nothing at all.
     """
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(
+            error="invalid_input",
+            message="Send a JSON object with content_id and reasoning.",
+        ), 400
 
-    # TODO: delete this and build the route.
+    content_id = payload.get("content_id")
+    reasoning = payload.get("reasoning")
+    if not isinstance(content_id, str) or not content_id.strip():
+        return jsonify(error="invalid_input", message="The content_id field must be a non-empty string."), 400
+    if not isinstance(reasoning, str) or not 1 <= len(reasoning.strip()) <= 5000:
+        return jsonify(
+            error="invalid_input",
+            message="The reasoning field must be a string between 1 and 5000 characters after trimming.",
+        ), 400
+
+    content_id = content_id.strip()
+    reasoning = reasoning.strip()
+    original = next(
+        (entry for entry in audit.entries_for(content_id) if entry.get("status") == "decided"),
+        None,
+    )
+    if original is None:
+        return jsonify(error="not_found", message="No submission was found for this content_id."), 404
+
+    audit.log_appeal(
+        content_id=content_id,
+        creator_id=original["creator_id"],
+        reasoning=reasoning,
+    )
     return jsonify({
-        "error": "not_implemented",
-        "message": "POST /appeal isn't built yet — see the TODO in app.py.",
-        "you_sent": payload,
-    }), 501
+        "content_id": content_id,
+        "status": "under_review",
+        "message": "Your appeal has been recorded for review.",
+    })
 
 
 # ── Already works ─────────────────────────────────────────────────────────────

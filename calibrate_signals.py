@@ -70,6 +70,8 @@ def main():
             assert body[key] == entry[key]
         assert body['confidence'] == entry['combined_score']
         assert entry['status'] == 'decided'
+        assert (body['guess'], body['label']) == scoring.score_to_label(body['confidence'])
+        assert entry['guess'] == body['guess'] and entry['label'] == body['label']
         log_response = client.get('/log').get_json()
         assert entry in log_response['entries']
         row = dict(case, **body, combined_score=body['confidence'],
@@ -81,7 +83,7 @@ def main():
     output = Path(__file__).resolve().parent / 'results' / 'calibration_signals.json'
     output.write_text(json.dumps(results, indent=2) + '\n', encoding='utf-8')
     print(f'Saved {output}')
-    print('Note: route guess/label are placeholders; mapped_guess is diagnostic only.')
+    print('Verified: response and audit guess/label match score_to_label.')
 
 
 if __name__ == '__main__':

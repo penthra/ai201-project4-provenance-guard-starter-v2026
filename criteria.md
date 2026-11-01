@@ -49,7 +49,7 @@ No more than 3 out of 10 human-written samples should be labeled AI-generated.
 
 
 **Why this target:**
-This allows some mistakes while still expecting most human writing to be classified correctly.
+A false accusation can harm a writer’s credibility, so at least 7 of 10 human samples should avoid an AI label. Allowing three mistakes is a starting prototype target, though too high for real use.
 
 
 ---
@@ -61,7 +61,7 @@ The average score for 5 clearly AI-generated samples should be at least 0.15 hig
 
 
 **Why this target:**
-This shows a noticeable difference without requiring perfect separation.
+A 0.15 gap would show that the scores distinguish these two groups on average without requiring perfect separation. Smaller gaps could make the two signals less useful for labeling.
 
 
 ---
@@ -69,12 +69,11 @@ This shows a noticeable difference without requiring perfect separation.
 ## 3.
 
 <!-- Your criterion. -->
-
+Each of the three labels should appear at least once when testing 15 varied samples.
 
 
 **Why this target:**
-
-Each of the three labels should appear at least once when testing 15 varied samples.
+Testing 15 varied samples checks that all three labels are reachable, including unsure. This checks label coverage, not whether the labels are accurate.
 
 ---
 
@@ -85,7 +84,7 @@ At least 4 out of 5 valid appeals should update the review status and create a s
 
 
 **Why this target:**
-This is a basic prototype target that allows one failure while checking that the appeal feature usually works.
+An appeal gives writers a way to challenge a wrong decision. Four successes out of five is a prototype target, though a real service should record every valid appeal.
 
 
 ---
@@ -98,7 +97,7 @@ At least 3 out of 4 tests—missing text, empty text, whitespace-only text, and 
 
 **Why this target:**
 
-This checks basic input protection while leaving room to improve one case.
+These four cases cover common invalid submissions. Handling at least three checks basic input protection, though a real service should reject all four safely.
 
 ---
 

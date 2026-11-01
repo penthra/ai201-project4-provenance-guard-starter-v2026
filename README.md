@@ -39,13 +39,11 @@
 <!-- The path a submission takes, from arriving to the label a reader sees.
      Six or seven steps — this is the trace you wrote in Milestone 1. -->
 
-This describes planned behavior, not a completed implementation. Scores below are hypothetical, not test results.
-
 1. The writer sends `text` and `creator_id` as JSON to `POST /submit` in `app.py`. This gives the service the writing and identifies the submitting creator.
 2. The route validates the input and assigns a unique `content_id` to a valid submission. Validation rejects unsuitable requests; the ID connects this particular decision to a later appeal.
 3. `detector.model_signal(text)` measures predictability with a local language model. It adds `model_score`, from 0 to 1, with higher values meaning more AI-like.
 4. `stylometry.style_signal(text)` measures sentence-length variation, vocabulary variety, and punctuation density. It adds a separate `style_score`, also from 0 to 1 with higher values meaning more AI-like.
-5. `scoring.combine_signals(model_score, style_score)` combines the signals into one score using the proposed equal weights below.
+5. `scoring.combine_signals(model_score, style_score)` combines the signals into one score using the equal weights below.
 6. `scoring.score_to_label(score)` maps that score to `human`, `unsure`, or `ai` and adds the full message a reader sees.
 7. `audit.log_decision(...)` saves the IDs, both signal scores, combined score, guess, label, and status. The route returns the ID, scores, guess, and label as JSON so the caller can display the result.
 
@@ -76,7 +74,7 @@ This describes planned behavior, not a completed implementation. Scores below ar
 
 **What it can't see:**This signal cannot understand the text’s meaning or identify its author. Someone can change its score by adding typos, splitting sentences, or changing punctuation. Human writing can also have a regular style and be incorrectly flagged.
 
-The planned raw style measurements are:
+The raw style measurements are:
 
 - **Sentence-length spread:** standard deviation of sentence word counts divided by their mean. Low values mean similar sentence lengths. With fewer than two sentences or no words, return 0 for this raw measure; this is insufficient evidence of variation, not proof of AI authorship.
 - **Type-token ratio:** distinct lowercase words divided by total words, using the provided word splitter. For example, “Cats chase cats” gives 2/3. Longer texts tend to repeat more words, so length affects this measure independently of authorship.
@@ -132,7 +130,7 @@ Ran `python calibrate_signals.py` on October 30, 2026 using the real local model
 
 **Why edited AI matters:** Editing lowered the model score by 0.0696 and the style score by 0.1212, reducing the combined score from 0.6139 to 0.5185. The style signal was more sensitive to these changes: splitting a sentence changes length variation, and an added aside changes vocabulary variety. The known AI origin did not change. The broad unsure band avoids firm accusations for these human samples, but also leaves both known-AI examples unsure. Four samples do not establish accuracy.
 
-**Logging:** Each successful submission now records `model_score`, `style_score`, and `combined_score` through `audit.log_decision(...)`, along with its timestamp, content ID, creator ID, guess, label, and status. The response carries both signal scores and the combined score as `confidence`. All four records were read back and matched to their responses. The route's `guess` and reader-facing `label` remain placeholders for Milestone 5; the mapped guesses in this table were computed separately for diagnosis.
+**Logging:** Each successful submission now records `model_score`, `style_score`, and `combined_score` through `audit.log_decision(...)`, along with its timestamp, content ID, creator ID, guess, label, and status. The response carries both signal scores and the combined score as `confidence`. All four records were read back and matched to their responses. At the time of that calibration run, the route's `guess` and reader-facing `label` were placeholders, so the mapped guesses in this table were computed separately for diagnosis. The route now calls `scoring.py::score_to_label` and returns and logs the actual guess and message.
 
 
 
@@ -147,9 +145,9 @@ Ran `python calibrate_signals.py` on October 30, 2026 using the real local model
 
 | Label | Score range | The exact text a reader sees |
 |---|---|---|
-| high-confidence human | `0.00 <= score <= 0.20` | Our checks suggest this text was written by a person. This is an automated estimate. |
-| unsure | `0.20 < score < 0.80` | Our checks cannot reliably determine how this text was written. |
-| high-confidence AI | `0.80 <= score <= 1.00` | Our checks suggest this text may be AI-generated. This can be wrong. You can request a review. |
+| human | `0.00 <= score <= 0.20` | We think this text was probably written by a person. This is an automated estimate and can be wrong. |
+| unsure | `0.20 < score < 0.80` | Our checks cannot reliably tell whether this text was written by a person or generated by AI. |
+| ai | `0.80 <= score <= 1.00` | We think this text may have been generated by AI. This estimate can be wrong. You can request a review. |
 
 **Why I worded the "unsure" one this way:**
 <!-- It's the hardest of the three. It has to admit uncertainty without
@@ -157,7 +155,20 @@ Ran `python calibrate_signals.py` on October 30, 2026 using the real local model
      written every word themselves. -->
 
 
-The unsure message describes the limits of the checks without accusing the writer. A wide unsure band aims to reduce false accusations, accepting that more AI writing may receive an unsure result. These are proposed ranges and messages, not implemented behavior.
+The unsure message describes the limits of the checks without accusing the writer. A wide unsure band aims to reduce false accusations, accepting that more AI writing may receive an unsure result. The ranges match `HUMAN_THRESHOLD = 0.20` and `AI_THRESHOLD = 0.80` in `config.py`. These exact messages are implemented in `scoring.py::score_to_label`. `/submit` uses the combined score to select the guess and message, returns both, and saves both in the audit record.
+
+### Verified label reachability
+
+Ran `python verify_labels.py` on October 30, 2026 with the real local detector through Flask's `/submit` test client. All three synthetic style probes reached their expected labels, and each response matched its saved audit entry read back through `/log`. Full texts, content IDs, and responses are in [results/label_coverage.json](results/label_coverage.json). These examples demonstrate reachability, not authorship accuracy.
+
+| Submitted text | Model score | Style score | Combined score | Returned guess |
+|---|---:|---:|---:|---|
+| Plain conventional prose | 0.9404 | 0.5295 | 0.73495 | unsure |
+| Varied narrative | 0.2297 | 0.0286 | 0.12915 | human |
+| Repeated unusual vocabulary | 0.8935 | 0.8125 | 0.85300 | ai |
+
+`scoring.label_ranges()` now prints explicit inclusive and exclusive boundaries: `human: 0.00 <= score <= 0.20`, `unsure: 0.20 < score < 0.80`, and `ai: 0.80 <= score <= 1.00`. Exact boundary and neighboring-float checks passed, and a scan of 10,001 scores from 0 to 1 found no missing labels. No threshold changes were needed for this reachability check. Re-running `verify_labels.py` appends three new decisions to the audit log.
+
 
 ### False-positive scenario
 
@@ -165,15 +176,15 @@ A student writing in a second language submits a paragraph they wrote themselves
 
 Suppose the hypothetical scores are `model_score = 0.90` and `style_score = 0.80`. The combined score is `(0.5 * 0.90) + (0.5 * 0.80) = 0.85`. This is an invented example, not a measured result or an 85% verified probability of AI authorship.
 
-Because 0.85 exceeds the proposed 0.80 boundary, the writer receives `guess: "ai"` and: “Our checks suggest this text may be AI-generated. This can be wrong. You can request a review.” This is a false positive: real human writing triggered patterns the system associates with AI.
+Because 0.85 exceeds the 0.80 boundary, the writer receives `guess: "ai"`. This is a false positive: real human writing triggered patterns the system associates with AI.
 
 The service logs the original decision with status `decided` and returns its `content_id`. The writer sends that ID and an explanation to `POST /appeal`, such as: “I wrote this myself. I used simple sentences because I am still learning English.” The route verifies the submission exists, records the appeal, and changes the item's latest status to `under_review`. The original decision remains in the audit log.
 
-The response confirms the appeal was recorded. It does not automatically clear the writer or promise a completed review; a process to resolve reviews still needs to be defined. Raising the AI boundary from the starter 0.65 to the configured 0.80 places scores such as 0.70 in unsure, but does not prevent this 0.85 mistake. I accept more uncertain results to reduce accusations and will test the boundaries on genuine human writing during calibration.
+The response confirms the appeal was recorded. It does not automatically clear the writer or promise a completed review; a process to resolve reviews still needs to be defined. Raising the AI boundary from the starter 0.65 to the configured 0.80 places scores such as 0.70 in unsure, but does not prevent this 0.85 mistake. I accept more uncertain results to reduce accusations.
 
 ## Endpoint Contracts
 
-These describe the planned implementation. Both endpoints accept a JSON object with `Content-Type: application/json` and return JSON. Unknown request fields are ignored. Required strings are trimmed before validation and use. Lengths count Python string characters after trimming, not bytes.
+Both endpoints accept a JSON object with `Content-Type: application/json` and return JSON. Unknown request fields are ignored. Required strings are trimmed before validation and use. Lengths count Python string characters after trimming, not bytes.
 
 ### POST /submit
 
@@ -240,47 +251,97 @@ Rate limiting belongs to a later unit and remains disabled for this design.
 
 ## Sample Run
 
-<!-- One submission and one appeal, pasted as text: the request, the response,
-     and the log entries. -->
+The appeal and log checks below were run with Windows `curl.exe` on October 30, 2026 against the updated app on port 5057. That port was used for this verification so an existing server on port 5000 could keep running. Normal `python app.py` startup still uses port 5000.
 
-**A submission**
+**An earlier submission**
 
-<!-- The response needs content_id, guess, confidence, label, AND both
-     signal scores - model_score and style_score. Unit 8's tools read those
-     two off the response, so leaving them out costs you next unit's
-     diagnostics. -->
+This real submission came from `python verify_labels.py`, which sent the following JSON through Flask's `/submit` test client. Its saved content ID was reused for the appeal; no new submission was needed.
 
-```bash
-$ curl -X POST http://127.0.0.1:5000/submit \
-  -H "Content-Type: application/json" \
-  -d '{"text": "...", "creator_id": "..."}'
-```
+`POST /submit` request:
 
 ```json
+{
+  "text": "The xylophonic zephyr perplexes the quincunx. The quincuncial zephyr perplexes the syzygy. The syzygetic zephyr perplexes the xylophone. The xylophonic zephyr perplexes the quincunx.",
+  "creator_id": "label-coverage-check"
+}
+```
 
+Actual response: **HTTP 200**
+
+```json
+{
+  "confidence": 0.853,
+  "content_id": "6d406b50-c613-4f88-8cda-dde317ecc65d",
+  "guess": "ai",
+  "label": "We think this text may have been generated by AI. This estimate can be wrong. You can request a review.",
+  "model_score": 0.8935,
+  "style_score": 0.8125
+}
 ```
 
 **An appeal**
 
-```bash
-$ curl -X POST http://127.0.0.1:5000/appeal \
-  -H "Content-Type: application/json" \
-  -d '{"content_id": "...", "reasoning": "..."}'
-```
+The file `results/appeal_request.json` contains:
 
 ```json
+{
+  "content_id": "6d406b50-c613-4f88-8cda-dde317ecc65d",
+  "reasoning": "This is a calibration appeal. Please review the AI-like label and the limitations of the two signals."
+}
+```
 
+Executed from the repository directory in Windows, using a JSON file to avoid PowerShell quoting problems:
+
+```powershell
+curl.exe --silent --show-error -i http://127.0.0.1:5057/appeal -H "Content-Type: application/json" --data-binary "@results/appeal_request.json"
+```
+
+Actual response: **HTTP/1.1 200 OK**
+
+```json
+{
+  "content_id": "6d406b50-c613-4f88-8cda-dde317ecc65d",
+  "message": "Your appeal has been recorded for review.",
+  "status": "under_review"
+}
 ```
 
 **What the log shows afterwards**
 
-```bash
-$ curl "http://127.0.0.1:5000/log?limit=3"
+```powershell
+curl.exe --silent --show-error -i "http://127.0.0.1:5057/log?limit=2"
 ```
+
+Actual response: **HTTP/1.1 200 OK** (JSON formatted for readability):
 
 ```json
-
+{
+  "count": 2,
+  "entries": [
+    {
+      "timestamp": "2026-10-30T20:27:26+00:00",
+      "content_id": "6d406b50-c613-4f88-8cda-dde317ecc65d",
+      "creator_id": "label-coverage-check",
+      "guess": "ai",
+      "model_score": 0.8935,
+      "style_score": 0.8125,
+      "combined_score": 0.853,
+      "label": "We think this text may have been generated by AI. This estimate can be wrong. You can request a review.",
+      "status": "decided"
+    },
+    {
+      "timestamp": "2026-10-30T20:31:03+00:00",
+      "content_id": "6d406b50-c613-4f88-8cda-dde317ecc65d",
+      "creator_id": "label-coverage-check",
+      "event": "appeal",
+      "status": "under_review",
+      "reasoning": "This is a calibration appeal. Please review the AI-like label and the limitations of the two signals."
+    }
+  ]
+}
 ```
+
+Both entries reference the same content ID. The original decision remains `decided`, and the newer appeal entry makes the item's latest status `under_review`. The writer's reasoning and original creator ID are saved with the appeal. This records a request for review; it does not rescore the text or reverse the decision.
 
 ---
 
@@ -288,15 +349,15 @@ $ curl "http://127.0.0.1:5000/log?limit=3"
 
 **Moment 1**
 
-- *What I asked for:*
-- *What came back:*
-- *What I changed:*
+- *What I asked for:* I asked AI to help implement the API endpoints in the corresponding project files, following the Unit 7 requirements.
+- *What came back:* AI helped write the `/submit` and `/appeal` routes in `app.py` and connect them to the signal, scoring, and audit functions.
+- *What I changed:* I gave follow-up instructions to guide the implementation toward the required behavior and response fields.
 
 **Moment 2**
 
-- *What I asked for:*
-- *What came back:*
-- *What I changed:*
+- *What I asked for:* I asked AI to help investigate errors that appeared while calling the API.
+- *What came back:* AI explained the error messages and suggested changes to the relevant code or request commands.
+- *What I changed:* I monitored the API call logs and error messages, then gave AI further instructions to address the problems I observed.
 
 <!-- ═══════════════════════ UNIT 8 — THE TEST ═══════════════════════ -->
 
