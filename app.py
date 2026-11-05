@@ -154,7 +154,7 @@ def health():
 # ── YOU BUILD THIS ────────────────────────────────────────────────────────────
 
 @app.post("/submit")
-# @limiter.limit(f"{config.RATE_LIMIT_PER_MINUTE}/minute;{config.RATE_LIMIT_PER_DAY}/day")
+@limiter.limit(f"{config.RATE_LIMIT_PER_MINUTE}/minute;{config.RATE_LIMIT_PER_DAY}/day")
 def submit():
     """
     Take a piece of text, decide about it, log the decision, answer.
@@ -204,16 +204,26 @@ def submit():
     """
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
+        audit.log_rejection(creator_id="unknown", reason="invalid_json_object")
         return jsonify(error="invalid_input", message="Send a JSON object with text and creator_id."), 400
 
     text = payload.get("text")
     creator_id = payload.get("creator_id")
     if not isinstance(text, str) or not 20 <= len(text.strip()) <= 10000:
+        audit.log_rejection(
+            creator_id=(
+                creator_id
+                if isinstance(creator_id, str) and creator_id.strip()
+                else "unknown"
+            ),
+            reason="invalid_text",
+        )
         return jsonify(
             error="invalid_input",
             message="The text field must be a string between 20 and 10000 characters after trimming.",
         ), 400
     if not isinstance(creator_id, str) or not 1 <= len(creator_id.strip()) <= 100:
+        audit.log_rejection(creator_id="unknown", reason="invalid_creator_id")
         return jsonify(
             error="invalid_input",
             message="The creator_id field must be a string between 1 and 100 characters after trimming.",
@@ -224,8 +234,12 @@ def submit():
     try:
         model_score = detector.model_signal(text)
     except ValueError as exc:
+        audit.log_rejection(
+            creator_id=creator_id, reason="invalid_input", detail=str(exc)
+        )
         return jsonify(error="invalid_input", message=str(exc)), 400
     except (detector.DetectorUnavailable, ImportError):
+        audit.log_rejection(creator_id=creator_id, reason="detector_unavailable")
         return jsonify(
             error="detector_unavailable",
             message="The local detector is unavailable. Check its dependencies and model download.",
