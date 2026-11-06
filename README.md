@@ -42,7 +42,7 @@
 1. The writer sends `text` and `creator_id` as JSON to `POST /submit` in `app.py`. This gives the service the writing and identifies the submitting creator.
 2. The route validates the input and assigns a unique `content_id` to a valid submission. Validation rejects unsuitable requests; the ID connects this particular decision to a later appeal.
 3. `detector.model_signal(text)` measures predictability with a local language model. It adds `model_score`, from 0 to 1, with higher values meaning more AI-like.
-4. `stylometry.style_signal(text)` measures sentence-length variation, vocabulary variety, and punctuation density. It adds a separate `style_score`, also from 0 to 1 with higher values meaning more AI-like.
+4. `stylometry.style_signal(text)` scores sentence-length variation, vocabulary variety over sliding word windows, and repeated phrases. Punctuation density is diagnostic only. It adds a separate `style_score`, also from 0 to 1 with higher values meaning more AI-like.
 5. `scoring.combine_signals(model_score, style_score)` combines the signals into one score using the equal weights below.
 6. `scoring.score_to_label(score)` maps that score to `human`, `unsure`, or `ai` and adds the full message a reader sees.
 7. `audit.log_decision(...)` saves the IDs, both signal scores, combined score, guess, label, and status. The route returns the ID, scores, guess, and label as JSON so the caller can display the result.
@@ -68,7 +68,7 @@
 
 ### Signal two — the style signal
 
-**What it measures:**how much sentence lengths vary, the number of unique words divided by the total number of words, and the amount of punctuation relative to text length.
+**What it measures:** sentence-length variation, vocabulary variety within sliding word windows, and repeated three/four-word phrases. Whole-text vocabulary variety and punctuation density are also available as diagnostics.
 
 **Why that might differ between human and AI writing:**AI-generated writing may have more consistent sentence lengths and repeated vocabulary. Human writing may vary more in sentence length, word choice, and punctuation. These are tendencies, so they do not prove who wrote the text.
 
@@ -80,7 +80,23 @@ The raw style measurements are:
 - **Type-token ratio:** distinct lowercase words divided by total words, using the provided word splitter. For example, “Cats chase cats” gives 2/3. Longer texts tend to repeat more words, so length affects this measure independently of authorship.
 - **Punctuation density:** occurrences of `. , ! ? ; : - — ( )` divided by total words, with each punctuation character counted once. Return 0 if there are no words. This measures punctuation amount, not punctuation variety.
 
-The standalone style signal in `stylometry.py::style_signal` now uses `0.5 * (1 - min(sentence_length_spread, 1)) + 0.5 * (1 - type_token_ratio)`, rounded to four decimal places. Low spread and repeated vocabulary raise the score. With fewer than two word-bearing sentences, the spread component is neutral at 0.5; text without words returns an overall 0.5. Punctuation density is reported for calibration but has no scoring weight because its direction has not been established. These are starting heuristics, not calibrated authorship probabilities. The style signal is now connected to `/submit`; both raw signal scores and the combined score are returned and logged.
+- **Windowed type-token ratio:** mean distinct-word ratio across all 50-word sliding windows, or the available words for shorter inputs. This reduces whole-passage length dependence for longer text.
+- **Repeated-phrase ratio:** for each of three- and four-word phrases within sentences, count occurrences after the first and divide by all phrase occurrences; use the larger ratio. No usable phrases gives 0.
+
+The current `stylometry.py::style_signal` uses
+`base = 0.5 * spread_score + 0.5 * (1 - windowed_type_token_ratio(text))`,
+then returns `max(base, repeated_phrase_ratio(text))`, rounded to four decimal
+places. `spread_score` is `1 - min(sentence_length_spread, 1)`, with a neutral
+0.5 for fewer than two word-bearing sentences. Vocabulary variety is averaged
+over every 50-word window; shorter inputs use all available words, so their
+length dependence remains. Phrase repetition is the larger duplicate-occurrence
+fraction for three- and four-word phrases within sentences. Text without words
+returns 0.5. Punctuation density is diagnostic only. These are provisional
+heuristics, not calibrated authorship probabilities; human quotations and
+intentional repetition can also score high. The earlier calibration and
+before-run evidence below used the original whole-text vocabulary rule without
+the phrase feature. Both signal scores and the combined score are returned
+and logged. See **The Improvement** for the unchanged-input after evaluation.
 
 The model has another blind spot: it examines only the initial token window, currently 400 tokens in `config.py`. It cannot see authorship changes beyond that window. AI text with unusual vocabulary may also score as human-like because it is hard to predict.
 
@@ -389,23 +405,23 @@ can look like one. -->
 
 ## Attack Run — Before
 
-Run recorded on November 4, 2026 at 19:28 America/New_York by
-`run_attacks.py::main`, calling `app.py::submit`.
-[Full results and per-attack explanations](results/attack_run_2026-11-04_1928.md).
+I ran all 56 attacks on November 4, 2026 using `run_attacks.py::main`.
+[Full results](results/attack_run_2026-11-04_1928.md).
 
-**56 attacks: 46 HELD, 10 BROKE.** No request crashed or returned a 5xx.
-The thresholds were human <= 0.20 and AI >= 0.80, with equal signal weights.
-For evasion, avoiding the AI label counts as BROKE, including `unsure`;
-this does not mean the text was certified human. For false-positive attacks,
-`unsure` counts as HELD because the human writer was not accused of using AI.
-Prompt-injection verdicts assess the requested override or corruption.
-Malformed inputs count as HELD when rejected or handled with safe abstention;
-MF03 is BROKE because insufficient meaningful text received a human label.
+**46 HELD, 10 BROKE.** No requests crashed. The two signals each had a
+weight of 0.5. Scores at or below 0.20 were human, and scores at or above
+0.80 were AI.
 
-The flood's first eight requests were within the configured allowance and
-therefore HELD; the next four correctly returned 429. There were 12 flood
-rows in this file, despite their target description saying 20. This run does
-not replace the separate Milestone 1 flood test in **Rate Limiting**.
+For evasion attacks, I counted `unsure` as BROKE because the AI text avoided
+the AI label. For human samples, `unsure` was HELD because the service did
+not call their writing AI. For prompt injection, I checked whether the
+service followed the instruction or changed the output or log. For bad
+input, a clear error or an unsure result was HELD. MF03 was BROKE because
+text with control characters received a human label.
+
+The flood test allowed the first eight requests and returned 429 for the
+next four, which matched my limit. The file had 12 flood requests, although
+the description said 20. This is separate from the Milestone 1 flood test.
 
 | Family | Attacks | HELD | BROKE |
 |---|---|---|---|
@@ -476,20 +492,19 @@ not replace the separate Milestone 1 flood test in **Rate Limiting**.
 
 **Ten audit log entries from the run**
 
-These are original entries from `logs/audit.jsonl`, matched to the run by
-content ID. Their timestamps use UTC, so the November 4 evening run appears
-as November 5 in these entries. In order, they show:
+I picked these entries from `logs/audit.jsonl` using their content IDs.
+The timestamps are in UTC, so the November 4 evening run shows November 5.
 
-- EV01: typo-based evasion; low model score and an unsure result.
-- EV06: uneven sentence lengths; style score 0.125 pulls down the average.
-- EV09: mixed human/AI text; disagreement between the signals.
-- FP03: careful non-native English writing; model score above 0.80, final label unsure.
-- FP05: human technical documentation; the highest combined score among the human samples.
-- MF03: control-character input incorrectly receives a definite human label.
-- MF06: emoji-only input; model score 0.9969, final label unsure.
-- MF07: Arabic writing; high model score exposes a language-coverage concern, while the final label abstains.
-- PI05: attempted audit-log injection; the recorded scores and fields remain intact.
-- A flood rejection: the ninth through twelfth requests returned 429; this is one of their rejection entries. It has no decision scores because scoring did not run.
+- EV01: typos in AI text; result was unsure.
+- EV06: different sentence lengths gave a low style score.
+- EV09: human and AI text mixed together; result was unsure.
+- FP03: human writing by a non-native English speaker; result was unsure.
+- FP05: human technical writing had the highest score among the human samples.
+- MF03: text with control characters was labeled human.
+- MF06: emoji-only text had a high model score, but the final result was unsure.
+- MF07: Arabic text had a high model score, but the final result was unsure.
+- PI05: the attempt to change the audit log did not work.
+- One flood request was rejected with 429. It has no scores because it did not reach scoring.
 
 ```json
 [
@@ -606,44 +621,31 @@ as November 5 in these entries. In order, they show:
 **The single worst outcome** — the one I'd least want to explain to a writer
 whose work got caught by it:
 
-FP05, the human-written technical documentation, was the most concerning
-result for an affected writer: it received the highest combined score among
-the eight human samples, 0.6846. The model signal scored it 0.8005 and the
-style signal 0.5687. Clear procedural writing was treated as evidence of AI
-because predictable language can also be normal human technical prose.
-The equal-weight average and 0.80 AI threshold kept the final label at
-`unsure`, so this was a near miss, not an actual AI accusation. None of the
-eight human samples received an AI label in this run. I would not present
-the score as a calibrated probability that the writer used AI.
+I picked FP05, the human-written technical documentation. Its model score
+was 0.8005, style score was 0.5687, and combined score was 0.6846. This was
+the highest score among the eight human samples. A person writing clear
+instructions should not have to prove that simple wording is their own work.
 
-Among attacks marked BROKE, MF03 was the clearest unjustified authorship
-decision: control-character input containing little meaningful prose was
-labeled human at 0.125. This shows the route needs stronger checks for
-scorable text, or an explicit abstention for unsupported input. Nine of ten
-evasion inputs also avoided the AI label. Without unmodified baseline
-submissions, this run alone cannot show how much each edit changed its score.
+The final label was still `unsure`, so this was not an actual false AI
+accusation. None of the eight human samples was labeled AI. Among the
+attacks marked BROKE, MF03 was the clearest wrong decision: text with
+control characters received a human label at 0.125.
 
 ---
 
 ## Run Log and Verdicts
 
-All five criteria were run three times in one invocation of
-`python run_eval.py --label before` on November 6, 2026, America/New_York.
-Inputs, service code, weights, thresholds, and rate limits were unchanged
-between trials. The ten human samples were supplied by me in this chat;
-the five AI samples were generated by the assistant and are identified in
-`scenarios.py`. Criterion 2 uses the first five human samples. Criterion 3
-uses the ten human samples, two AI samples, and three fixed coverage probes
-from the earlier label-coverage check. Those probes test reachability, not
-accuracy on unseen writing.
+I ran `python run_eval.py --label before` once. It tested all five criteria
+three times without changing the code, inputs, or settings between trials.
+I used my ten writing samples for C1. C2 used the first five of my samples
+and five AI paragraphs generated by the assistant. C3 used 15 texts with
+low, middle, and high scores from earlier checks.
 
-The runner was extended to test appeals by submitting five texts, appealing
-the returned content IDs, then reading `/log` to verify each original
-`decided` entry and its saved `under_review` appeal. Each scenario/sample
-has a separate creator ID reused for its three trials, staying below the
-8-per-minute limit. All submissions for criteria 1–4 returned 200; all four
-invalid-input cases returned 400 in each trial. No request failures were
-counted as successful classifications.
+For C4, the runner submitted five texts, appealed each returned content ID,
+and checked `/log` for the saved appeal and `under_review` status. Each
+sample had its own creator ID, so the rate limiter did not block these tests.
+C1–C4 returned 200 for every submission. C5 returned 400 for all four bad
+inputs in every trial.
 
 | Criterion | Target | Run 1 | Run 2 | Run 3 | Verdict |
 |---|---|---|---|---|---|
@@ -655,13 +657,11 @@ counted as successful classifications.
 
 **Real output from Trial 1 for each criterion**
 
-Collected by `run_eval.py::main` and `run_eval.py::evaluate_submission`,
-saved by `run_eval.py::write_report` in
-[results/run_2026-11-06_1616_before.md](results/run_2026-11-06_1616_before.md)
-and [its JSON companion](results/run_2026-11-06_1616_before.json).
-The following blocks copy the full saved Trial 1 records for each criterion,
-including HTTP status and the actual response JSON. All three trials remain
-in the linked files.
+The JSON below is from Trial 1 for each criterion. It was collected by
+`run_eval.py::main` and `run_eval.py::evaluate_submission`, then saved by
+`run_eval.py::write_report` in
+[results/run_2026-11-06_1616_before.md](results/run_2026-11-06_1616_before.md).
+[The JSON file](results/run_2026-11-06_1616_before.json) has all three trials.
 
 **Criterion 1: my own writing — Trial 1**
 
@@ -1685,116 +1685,166 @@ in the linked files.
 
 **Diagnoses**
 
-The table above applies each original target to every trial: criteria 1, 3,
-4, and 5 are MET; criterion 2 is MISSED. A passing trial cannot cancel a
-miss in another trial. Here the measured outcomes were identical across all
-three trials.
+C1, C3, C4, and C5 were MET in every trial. C2 was MISSED in every trial.
 
-**Criterion 2 — MISSED. Stages: signal one, signal two, and the combining rule.**
-Signal one measures GPT-2 predictability, not authorship. Across the five AI
-and five human samples, its AI-minus-human mean difference was **-0.03180**:
-on average it ranked these human texts slightly more AI-like. Signal two
-uses sentence-length spread and vocabulary variety as proxies for authorship;
-its mean difference was only **0.05458**. The combining rule weights each at
-0.5, so the gaps partly cancel:
-`0.5 × (-0.03180) + 0.5 × 0.05458 = 0.01139`.
-That is below the required 0.15 in every trial. Changing the label mapping
-cannot fix this score-gap criterion, because labels are assigned afterward.
-The diagnosis is weak separation by the proxy signals, compounded by their
-equal-weight average. More varied labeled samples are needed before choosing
-a different signal or weight; this small run does not establish general accuracy.
-The target remains 0.15.
+For C2, the stages were signal one, signal two, and the combining rule.
+Signal one measures how predictable the words are. It does not know who
+wrote them. Its AI average was 0.03180 lower than its human average.
+Signal two measures sentence lengths and word variety. Its AI average was
+only 0.05458 higher than its human average. With equal weights, the final
+gap was `0.5 × (-0.03180) + 0.5 × 0.05458 = 0.01139`, below my 0.15 target.
+The two signals did not separate these groups well. Changing the label
+thresholds would not fix C2 because it compares scores before labels.
 
-**Every broken attack — stage and mechanism**
+EV01–EV09 all returned `unsure`, so they avoided the AI label. The table
+below gives the stage and mechanism for each broken attack. These numbers
+are from the before run and the original style rule.
 
-For EV01–EV09, the common final path is the combining rule followed by label
-mapping: the equal-weight score remained below the AI threshold of 0.80 and
-above the human threshold of 0.20, so the response was `unsure`. Under the
-stated evasion rule, that avoided an AI label and counts as BROKE. None was
-certified human. The table identifies the mechanisms behind those scores.
-Style measurements below were recomputed from the saved CSV inputs using
-`stylometry.py`; model scores are from the recorded attack responses.
-
-| Broken attack | Stage(s) | Mechanism and evidence |
+| Broken attack | Stage | Mechanism |
 |---|---|---|
-| EV01 — typos | Signal one; signal two; combining rule | Misspellings can make text less predictable and create distinct word tokens. The recorded model score was 0.1635; vocabulary variety was 0.8706, which the style rule inverts as human-like evidence. Style 0.4843 and model 0.1635 averaged to 0.3239. |
-| EV02 — sentence splitting | Signal two; combining rule | Short inserted sentences make sentence lengths uneven. Measured spread 0.8492 and vocabulary variety 0.8242 produced style 0.1633. Averaging with model 0.5943 gave 0.3788. |
-| EV03 — pasted quotation | Signal two; combining rule | The style rule measures the entire mixed passage without distinguishing the quotation's source. Spread 0.4434 and vocabulary variety 0.8396 yielded style 0.3585; with model 0.6662, the average was 0.51235. |
-| EV04 — unusual vocabulary | Signal one; signal two; combining rule | Rare-word substitution targets the assumption that low predictability means human authorship. It also yielded high vocabulary variety, 0.8721. The recorded model score 0.6114 and style 0.4769 averaged to 0.54415, short of an AI label. The model score alone does not establish that rare words caused a reduction. |
-| EV05 — heavy editing | Signal one; signal two; combining rule | The edited AI-origin passage retains no explicit provenance in either signal: both judge its current surface form. Spread 0.6753 and variety 0.7683 produced style 0.2782; model 0.3212 produced a combined 0.2997. The two low proxy scores reinforce each other. |
-| EV06 — one long and one short sentence | Signal two; combining rule | Spread 1.1859 exceeds the style rule's clipping point of 1, making its sentence-spread component zero. Vocabulary variety 0.75 gives a vocabulary component of 0.25. Their average is style 0.125; combined with model 0.5727, the score is 0.34885. |
-| EV07 — punctuation padding | Signal two; combining rule | Punctuation density has no direct scoring weight. This passage is treated as one word-bearing sentence, so it receives the neutral spread component 0.5 rather than evidence from several sentences. Vocabulary variety 0.7732 produces style 0.3634. With model 0.5862, the average is 0.4748. The mechanism is sentence segmentation and the insufficient-sentence fallback, rather than a direct punctuation-density penalty. |
-| EV08 — short text | Route; signal one; signal two | The route accepts the 65-character passage, and the detector only requires three model tokens. That permits an authorship estimate from just ten recognized words. All ten words are distinct, so the vocabulary component is zero; style is 0.3586. Model 0.2452 produces an average of 0.3019. There is no minimum amount of meaningful prose sufficient for a reliable judgment. |
-| EV09 — human opening on AI text | Signal two; combining rule | The style rule aggregates both sources rather than identifying the AI portion. The combined passage has spread 0.4675 and variety 0.8468, yielding style 0.3428. Averaging with model 0.7042 gives 0.5235. |
-| MF03 — control characters | Route; signal one; signal two; label mapping | Validation checks string type and character length but not whether it contains enough meaningful prose. The payload is 21 characters and passes. The word regex extracts three distinct tokens, including ANSI escape-sequence fragments; with one word-bearing sentence, style becomes 0.25. Model 0.0 and style 0.25 average to 0.125, which maps to a human label even though the input provides insufficient authorship evidence. |
+| EV01 — typos | Signal one and signal two | Typos can make words harder to predict and make the word list look more varied. Model 0.1635 and style 0.4843 gave a combined score of 0.3239. |
+| EV02 — sentence splitting | Signal two | Short added sentences increased sentence-length spread to 0.8492. The style score was 0.1633, which lowered the combined score to 0.3788. |
+| EV03 — pasted quotation | Signal two | The service measured the quotation and AI text together. Word variety was 0.8396 and style was 0.3585. The combined score was 0.51235. |
+| EV04 — unusual words | Signal one and signal two | Unusual words can make text harder to predict. Word variety was also high at 0.8721. Model 0.6114 and style 0.4769 gave a combined score of 0.54415. |
+| EV05 — heavy editing | Signal one and signal two | Both signals judged the edited wording, without knowing its AI origin. Model 0.3212 and style 0.2782 gave a combined score of 0.2997. |
+| EV06 — long and short sentences | Signal two | Sentence-length spread was above 1, so that part of the style score became zero. Style 0.125 lowered the combined score to 0.34885. |
+| EV07 — punctuation | Signal two | The sentence splitter treated the text as one word-bearing sentence and used its default spread value of 0.5. Punctuation density had no direct scoring weight. Style was 0.3634 and the combined score was 0.4748. |
+| EV08 — short text | Route and both signals | The route accepted 65 characters with only ten recognized words. Every word was different, so the style rule treated the vocabulary as varied. Model 0.2452 and style 0.3586 gave a combined score of 0.3019. There was too little text for a reliable decision. |
+| EV09 — human opening | Signal two | The service measured the human opening and AI text together. The mixed text had varied words and sentence lengths. Style 0.3428 lowered the combined score to 0.5235. |
+| MF03 — control characters | Route, both signals, and label mapping | The route checked character length but not whether the text had enough real words. The word splitter also counted parts of the control codes. Model 0.0 and style 0.25 gave 0.125, which mapped to human. |
 
-These are code-consistent explanations of the observed outcomes. The run
-did not include unmodified controls, so it cannot prove how much each edit
-changed a score. In particular, EV01 and EV04's model-score changes should
-be tested with paired original/modified inputs before attributing a causal effect.
+The main pattern is that signal two can confuse changes in writing style
+with changes in authorship. Several attacks changed sentence lengths or
+word variety while keeping AI text. Averaging the two signals still left
+these attacks in the unsure range. MF03 showed a separate problem: enough
+characters does not mean enough meaningful text.
 
-**Patterns across the failures**
-
-- **Surface form substitutes for authorship.** Signal two treats varied sentence
-  lengths and distinct words as human-like evidence. EV02 and EV06 exploit
-  sentence-length spread; EV01, EV03, EV04, EV05, EV08, and EV09 show the
-  importance of vocabulary variety or mixed passage structure. EV07 exposes
-  the sentence splitter's neutral fallback. These are related weaknesses in
-  one heuristic signal, rather than nine unrelated defects.
-- **The average does not create evidence the signals lack.** Criterion 2 shows
-  weak or reversed group separation; the evasion results show intermediate
-  scores ending in the broad unsure band. Narrowing that band might catch
-  more AI text but would require repeating the false-positive tests, because
-  the same band protected all ten genuine human samples in this run.
-- **Input length does not establish scorable prose.** MF03's definite human
-  label and EV08's short-text estimate show missing evidence-quality checks.
-  Criterion 5 passed all four specified cases, but those cases do not test
-  control-character payloads or meaningful-word minimums.
-
-Four criteria passed, but they do not establish deployment readiness. The
-original allowances of three false accusations in ten, one failed appeal
-in five, and one unsafe invalid-input response in four are permissive.
-Criterion 1 is the first target I would tighten in a future evaluation,
-from at most 3/10 false accusations to at most 1/10 using a broader human
-sample set. That is a proposed future target; the original criteria and
-this run's verdicts remain unchanged.
+I did not test each edited passage against an unchanged version, so I cannot
+say exactly how much each edit changed its score. These results show where
+the service failed, but not how accurate it is on all writing.
 
 ---
 
 ## The Improvement
 
-**What I changed:**
+**What I changed:** I updated signal two in `stylometry.py`. It now measures
+word variety in 50-word windows instead of using the whole passage at once.
+Shorter texts use all their words. It also checks repeated three- and
+four-word phrases. If the repetition score is higher than the original
+style calculation, it uses that score. I kept the model, combining weights,
+thresholds, and test samples the same.
 
-**Which diagnosis pointed at it:**
+**Which diagnosis pointed at it:** Several attacks changed word variety or
+sentence lengths to get a lower score. Also, longer texts naturally repeat
+more words. I added fixed-size windows to reduce that length effect and
+phrase checks to catch repeated wording.
 
 ### Attack Run — After
 
-<!-- Same format. `run_attacks.py --label after` -->
+I ran all 56 attacks again with `run_attacks.py::main` on November 6, 2026.
+[Full after results](results/attack_run_2026-11-06_1634_after.md).
+The result was still **46 HELD, 10 BROKE**. The flood allowed eight requests
+and rejected four with 429. No requests crashed.
 
+| ID | Family | Targeting | Status | Content ID | Guess | Score | Verdict |
+|---|---|---|---|---|---|---|---|
+| EV01 | evasion | signal two: typos raise word variety | 200 | `25c31927-bf16-41eb-a1e4-2aba08782fe8` | unsure | 0.307 | BROKE |
+| EV02 | evasion | signal two: broken-up sentences raise length spread | 200 | `9eff8e35-2ab7-424b-9ee4-85a5e48c254b` | unsure | 0.361 | BROKE |
+| EV03 | evasion | signal two: a pasted quotation changes the shape | 200 | `7a1dc557-3d59-4030-8f14-21fea143b8c8` | unsure | 0.486 | BROKE |
+| EV04 | evasion | signal one: unusual words raise perplexity | 200 | `0c1e120e-8fff-4c81-80f0-cef17897076c` | unsure | 0.527 | BROKE |
+| EV05 | evasion | both signals: heavy human editing pass | 200 | `de809b55-ffdc-46c4-9bb3-57ef56b60fa7` | unsure | 0.277 | BROKE |
+| EV06 | evasion | signal two: one very long sentence and one very short | 200 | `4faf21ba-1259-4a84-9704-ad634a148b96` | unsure | 0.324 | BROKE |
+| EV07 | evasion | signal two: padding with punctuation | 200 | `7c9eb5a7-9d31-48b2-9916-a8f63e092419` | unsure | 0.457 | BROKE |
+| EV08 | evasion | signal one: text below the token window | 200 | `24b023bc-05dd-4bab-9be2-3a01f828b532` | unsure | 0.302 | BROKE |
+| EV09 | evasion | both: AI text with a human opening paragraph bolted on | 200 | `fd9ae47c-f4ba-4a6e-856f-7c671ae68a3c` | unsure | 0.502 | BROKE |
+| EV10 | evasion | signal two: repeated stanza structure | 200 | `1d73d2ea-abfe-449d-b1b6-6bf57bc1719d` | ai | 0.818 | HELD |
+| FP01 | false_positive | plain, clear human writing with no flourishes | 200 | `357f7db1-c6c2-4a17-967e-922c34e0b162` | unsure | 0.493 | HELD |
+| FP02 | false_positive | human writing in a formal register | 200 | `acf0c6cf-3c72-484d-a190-260c0806f8a3` | unsure | 0.617 | HELD |
+| FP03 | false_positive | a non-native English speaker writing carefully | 200 | `45785e1e-5922-4578-893d-c6b1adc75966` | unsure | 0.616 | HELD |
+| FP04 | false_positive | a student essay written to a rubric | 200 | `12ade363-0277-46c1-a024-cbbb7399cc6c` | unsure | 0.619 | HELD |
+| FP05 | false_positive | technical documentation written by a person | 200 | `bf1e1242-da54-4689-8318-47d3bb894120` | unsure | 0.675 | HELD |
+| FP06 | false_positive | a person imitating a formal template | 200 | `697c46a6-11e5-4bb3-8a86-3e047717142c` | unsure | 0.622 | HELD |
+| FP07 | false_positive | human writing that repeats a phrase deliberately | 200 | `548ffa94-8fde-4862-8b56-604a0797c35b` | unsure | 0.627 | HELD |
+| FP08 | false_positive | very short genuine human submission | 200 | `75a19c93-f306-4c7c-8c50-76b087d90d30` | unsure | 0.303 | HELD |
+| PI01 | prompt_injection | instruction to ignore the check | 200 | `94ce61e6-eb32-4ba2-906a-956f371d97f6` | unsure | 0.332 | HELD |
+| PI02 | prompt_injection | instruction disguised as a system message | 200 | `8407b2b2-39f9-4821-832b-36b9404dee36` | unsure | 0.200 | HELD |
+| PI03 | prompt_injection | instruction wrapped in the writer's voice | 200 | `f681eeeb-5a78-48c7-a781-d77e0f134d56` | unsure | 0.481 | HELD |
+| PI04 | prompt_injection | attempt to make the label text hostile | 200 | `fb8967ee-84ba-4d94-86a1-3af4486ae9cb` | unsure | 0.436 | HELD |
+| PI05 | prompt_injection | attempt to inject into the audit log | 200 | `4f11ac17-f378-4f17-8129-71744b418856` | unsure | 0.461 | HELD |
+| PI06 | prompt_injection | instruction plus real human text | 200 | `838a6a80-4e39-4fba-bf56-f84cb3112ef9` | unsure | 0.465 | HELD |
+| MF01 | malformed | text is only whitespace | 400 | `—` | — | — | HELD |
+| MF02 | malformed | text is a single character | 400 | `—` | — | — | HELD |
+| MF03 | malformed | text is control characters | 200 | `6c3a7c4c-28ea-4860-a3bc-f5202f4a6ea6` | human | 0.125 | BROKE |
+| MF04 | malformed | text is only punctuation | 200 | `8b8e5d94-97a7-4b85-9865-693afd313c6a` | unsure | 0.256 | HELD |
+| MF05 | malformed | text is a very long single word | 200 | `55bbcb6c-0b28-4899-884d-51b5dfae6f06` | unsure | 0.624 | HELD |
+| MF06 | malformed | text is emoji only | 200 | `15f05be8-857e-45f6-a738-9f2d092e5e4f` | unsure | 0.748 | HELD |
+| MF07 | malformed | text is right-to-left script | 200 | `c3f293d6-ceab-49d9-a634-3a7f6b227fa8` | unsure | 0.703 | HELD |
+| MF08 | malformed | text is 60,000 characters | 400 | `—` | — | — | HELD |
+| RQ01 | malformed | no text field at all | 400 | `—` | — | — | HELD |
+| RQ02 | malformed | no creator_id | 400 | `—` | — | — | HELD |
+| RQ03 | malformed | text is a number | 400 | `—` | — | — | HELD |
+| RQ04 | malformed | text is a list | 400 | `—` | — | — | HELD |
+| RQ05 | malformed | text is null | 400 | `—` | — | — | HELD |
+| RQ06 | malformed | creator_id is an object | 400 | `—` | — | — | HELD |
+| RQ07 | malformed | body is a JSON array, not an object | 400 | `—` | — | — | HELD |
+| RQ08 | malformed | body is unparseable JSON | 400 | `—` | — | — | HELD |
+| RQ09 | malformed | body is empty | 400 | `—` | — | — | HELD |
+| RQ10 | malformed | body is form-encoded, not JSON | 400 | `—` | — | — | HELD |
+| RQ11 | malformed | body is JSON claiming to be plain text | 400 | `—` | — | — | HELD |
+| RQ12 | malformed | deeply nested JSON | 400 | `—` | — | — | HELD |
+| FL01_01 | flood_same_creator | 20 rapid submissions from one creator | 200 | `cbaff17a-0e56-4f14-9bc7-861f73e1aceb` | human | 0.139 | HELD |
+| FL01_02 | flood_same_creator | 20 rapid submissions from one creator | 200 | `57f0f8e0-1490-43c2-b4f5-7b4ecccbf35b` | human | 0.139 | HELD |
+| FL01_03 | flood_same_creator | 20 rapid submissions from one creator | 200 | `99e26c4b-8918-4cd1-b1ec-2c20662f7e62` | human | 0.139 | HELD |
+| FL01_04 | flood_same_creator | 20 rapid submissions from one creator | 200 | `b51b257f-d38a-49df-915c-d8b33a6d9f56` | human | 0.139 | HELD |
+| FL01_05 | flood_same_creator | 20 rapid submissions from one creator | 200 | `012656de-ff1a-4463-805a-0b7300a2ea76` | human | 0.139 | HELD |
+| FL01_06 | flood_same_creator | 20 rapid submissions from one creator | 200 | `1021dc83-3599-4f78-9eac-3ecda70f56e7` | human | 0.139 | HELD |
+| FL01_07 | flood_same_creator | 20 rapid submissions from one creator | 200 | `60368ee4-8fd4-47b7-bf7c-bcd0649b3bf8` | human | 0.139 | HELD |
+| FL01_08 | flood_same_creator | 20 rapid submissions from one creator | 200 | `44ca442f-1d25-4c28-b05a-4f33ab5e5af6` | human | 0.139 | HELD |
+| FL01_09 | flood_same_creator | 20 rapid submissions from one creator | 429 | `—` | — | — | HELD |
+| FL01_10 | flood_same_creator | 20 rapid submissions from one creator | 429 | `—` | — | — | HELD |
+| FL01_11 | flood_same_creator | 20 rapid submissions from one creator | 429 | `—` | — | — | HELD |
+| FL01_12 | flood_same_creator | 20 rapid submissions from one creator | 429 | `—` | — | — | HELD |
 
+**Did it help, and how do I know:** I ran the same five criteria three times
+again. [After results](results/run_2026-11-06_1633_after.md).
+The C2 scores changed as follows:
 
-**Did it help, and how do I know:**
+| C2 measurement | Before | After | Change |
+|---|---|---|---|
+| Average AI score | 0.49316 | 0.49286 | -0.00030 |
+| Average human score | 0.48177 | 0.47456 | -0.00721 |
+| AI minus human average | 0.01139 | 0.01830 | +0.00691 |
 
-<!-- Widening the unsure band usually fixes one problem and creates another.
-     Reporting that trade honestly is worth full credit. -->
+The gap improved a little, from 0.01139 to 0.01830 in all three trials.
+Most of the change came from lower human scores. The AI average barely
+changed. AI and human scores were still almost the same, so **C2 was still
+MISSED** against the 0.15 target. These scores are not probabilities that
+the writing came from AI.
 
-
+C1, C3, C4, and C5 stayed MET. None of my ten samples was labeled AI.
+None of the 56 attack verdicts changed. The update made a small improvement
+in the score gap, but it did not solve the main problem.
 
 ---
 
 ## What's Still Broken
 
-<!-- For each attack still getting through and each criterion still missed:
-     what you'd do, and why you stopped. -->
+C2 still misses. I would next test more human and AI writing with similar
+topics, lengths, and formats. My human samples are mostly questions, while
+the AI samples are explanatory paragraphs. I need more examples to check
+whether the signals detect authorship or just writing style. I stopped
+after one change and the after run so I could report the result without
+repeatedly adjusting the code to fit these samples.
 
+EV01–EV09 still avoid the AI label. I would compare the original and edited
+versions to see which changes affect each signal. MF03 still gets a human
+label. The route needs a check for control characters and too little
+meaningful text. I changed only signal two in this update.
 
-
-**The trade I'd make if this ran for real:**
-
-<!-- Two sentences. Fewer wrong accusations means more AI text getting through.
-     Say which way you'd go and WHO PAYS FOR IT. -->
-
-
+**The trade I'd make if this ran for real:** I would keep the broad unsure
+range and the appeal path to reduce false accusations against real writers.
+More AI writing would get through, and the site would need to handle more
+reviews, but I would accept that cost before wrongly accusing a writer.
 
 <!-- ═════════════════════════════════════════════════════════════════════
 

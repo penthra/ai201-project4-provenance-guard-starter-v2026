@@ -4,13 +4,9 @@ Signal two: the style signal.
 Signal one reads the text for meaning. This one measures it *as text* — the
 shape of it, without understanding a word.
 
-Three raw measurements describe the shape of the text. Sentence-length spread
-and vocabulary variety form the score; punctuation density is reported for
-calibration and has no scoring weight yet.
-
-    sentence_length_spread   do sentences vary in length, or march in step?
-    type_token_ratio         how much of the vocabulary repeats?
-    punctuation_density      how many punctuation characters per word?
+Sentence-length spread, vocabulary variety over 50-word sliding windows,
+and repeated three/four-word phrases form the score. Punctuation density
+and whole-text vocabulary variety remain available as diagnostics.
 
 Why these might differ between human and AI writing: generated prose tends
 toward even, mid-length sentences and a narrower band of vocabulary, because
@@ -31,6 +27,7 @@ anything together:
 """
 
 import re
+from collections import Counter
 import statistics
 
 
@@ -69,6 +66,52 @@ def type_token_ratio(text: str) -> float:
     return len(set(tokens)) / len(tokens) if tokens else 0.0
 
 
+def windowed_type_token_ratio(text: str, window_size: int = 50) -> float:
+    """Mean distinct-word ratio across every fixed-size sliding word window.
+
+    For fewer than window_size words, use the whole available text. This
+    reduces length dependence on longer passages; short passages still have
+    length-dependent estimates. No words gives 0, as in type_token_ratio.
+    """
+    if window_size < 1:
+        raise ValueError("window_size must be positive")
+    tokens = words(text)
+    if not tokens:
+        return 0.0
+    width = min(window_size, len(tokens))
+    counts = Counter(tokens[:width])
+    total = len(counts) / width
+    for index in range(width, len(tokens)):
+        outgoing = tokens[index - width]
+        counts[outgoing] -= 1
+        if counts[outgoing] == 0:
+            del counts[outgoing]
+        counts[tokens[index]] += 1
+        total += len(counts) / width
+    return total / (len(tokens) - width + 1)
+
+
+def repeated_phrase_ratio(text: str) -> float:
+    """Largest duplicate-occurrence fraction for three- and four-word phrases.
+
+    Count only phrases within a sentence. For each phrase length, occurrences
+    after the first are duplicates; divide by all occurrences of that length.
+    No usable phrases gives 0. Repetition is a heuristic, not proof of AI:
+    quotations, templates, and deliberate human repetition can also score high.
+    """
+    tokenized = [words(sentence) for sentence in sentences(text)]
+    ratios = []
+    for width in (3, 4):
+        counts = Counter(
+            tuple(tokens[index:index + width])
+            for tokens in tokenized
+            for index in range(len(tokens) - width + 1)
+        )
+        total = sum(counts.values())
+        ratios.append((total - len(counts)) / total if total else 0.0)
+    return max(ratios)
+
+
 def punctuation_density(text: str) -> float:
     """Count . , ! ? ; : - — ( ) per word; 0 for text without words.
 
@@ -81,21 +124,21 @@ def punctuation_density(text: str) -> float:
     return sum(character in ".,!?;:-—()" for character in text) / word_count
 
 
-# ── Combining two measures ───────────────────────────────────────────────────
+# ── Combining style measurements ──────────────────────────────────────────
+
 
 def style_signal(text: str) -> float:
-    """Return a heuristic 0–1 score, with higher meaning more AI-like.
+    """Heuristic score, 0–1, higher meaning more AI-like.
 
-    Invert spread after clipping it to 0–1, and invert vocabulary variety.
-    Average the two components with equal weights. Spread at or above 1
-    contributes 0; identical sentence lengths contribute 1. With fewer than
-    two word-bearing sentences, the spread component is neutral (0.5).
-    Text without words also gets a neutral overall score of 0.5.
+    Retain the equal-weight spread/vocabulary rule, but measure vocabulary
+    over 50-word windows. Repeated-phrase evidence sets a floor on that score:
+    max(0.5 * spread_score + 0.5 * vocabulary_score, repeated_phrase_ratio).
+    This prevents high word variety from hiding extensive phrase duplication.
+    The window size and rule are explicit provisional choices, not fitted to
+    the evaluation inputs or calibrated probabilities of authorship.
 
-    Punctuation density is diagnostic only until calibration supports a
-    direction and scale. These choices are starting heuristics, not calibrated
-    evidence of authorship. Typos, text length, and sentence splitting can
-    change the result without changing the author.
+    Fewer than two word-bearing sentences gives a neutral spread component;
+    no words gives a neutral overall score. Punctuation has no direct weight.
     """
     if not words(text):
         return 0.5
@@ -105,8 +148,9 @@ def style_signal(text: str) -> float:
         1.0 - min(sentence_length_spread(text), 1.0)
         if word_bearing_sentences >= 2 else 0.5
     )
-    vocabulary_score = 1.0 - type_token_ratio(text)
-    return round(0.5 * spread_score + 0.5 * vocabulary_score, 4)
+    vocabulary_score = 1.0 - windowed_type_token_ratio(text)
+    base_score = 0.5 * spread_score + 0.5 * vocabulary_score
+    return round(max(base_score, repeated_phrase_ratio(text)), 4)
 
 
 if __name__ == "__main__":
@@ -120,6 +164,8 @@ if __name__ == "__main__":
     print(f"{len(sentences(text))} sentences, {len(words(text))} words\n")
     print(f"sentence_length_spread   {sentence_length_spread(text)}")
     print(f"type_token_ratio         {type_token_ratio(text)}")
+    print(f"windowed_type_token_ratio {windowed_type_token_ratio(text)}")
+    print(f"repeated_phrase_ratio     {repeated_phrase_ratio(text)}")
     print(f"punctuation_density      {punctuation_density(text)}")
     print(f"style_signal             {style_signal(text)}   (higher = more likely AI)")
     print("\nHeuristic score; punctuation density is diagnostic only.")
