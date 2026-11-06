@@ -381,24 +381,29 @@ Both entries reference the same content ID. The original decision remains `decid
 
 ## Rate Limiting
 
-**My limits:** ___ per minute, ___ per day
+**My limits:** 8 per minute, 200 per day.
 
-**Why those numbers and not others:**
-<!-- Think about two people: a real writer submitting their own work a few
-     times an hour, and a script sending a thousand variations to map your
-     thresholds. Your numbers have to be liveable for the first and hostile to
-     the second. -->
+**Why those numbers and not others:** A writer may submit a few versions
+of their work, so I allow eight requests per minute. This still slows down
+a script trying many changes quickly. The daily limit of 200 allows normal
+use but puts a limit on repeated testing. These are starting limits for
+this project, not numbers tested with real users.
 
-**What a caller counts as:** <!-- per address, or per creator_id? They fail
-differently — one script can look like a thousand callers, and one household
-can look like one. -->
+**What a caller counts as:** Requests count against the `creator_id`. If
+the ID is missing, blank, or not a string, they count against the caller's
+IP address instead. A script can use different IDs to avoid sharing one
+limit. People sharing an IP address may share the fallback limit.
 
 **The run of status codes when I pushed past it:**
 
-<!-- python run_attacks.py --flood 15 -->
+I ran `python run_attacks.py --flood 15`. All 15 requests used the same
+creator ID, `flood_tester`. The first eight returned 200, and the next seven
+returned 429. The rejected requests were also recorded in the audit log.
+This output is from `run_attacks.py::run_flood`, saved in
+[results/flood_2026-11-04_1830.md](results/flood_2026-11-04_1830.md).
 
 ```
-
+200 200 200 200 200 200 200 200 429 429 429 429 429 429 429
 ```
 
 ---
