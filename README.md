@@ -1685,35 +1685,79 @@ in the linked files.
 
 **Diagnoses**
 
-Criterion 2 missed in all three trials. The route returned complete scores,
-so this is a signal-separation problem rather than a request failure. On
-these five AI and five human samples, the AI-minus-human difference in the
-model signal was -0.03180 and in the style signal was 0.05458.
-Their equal-weight average produced only a 0.01139 combined-score gap.
-Moving label thresholds would not fix this criterion because it measures
-scores before label mapping. The signals need better separation, supported
-by more varied labeled examples. The target stays at 0.15. This small sample
-does not establish general detector accuracy, and the coverage probes were
-selected from previously observed results.
+The table above applies each original target to every trial: criteria 1, 3,
+4, and 5 are MET; criterion 2 is MISSED. A passing trial cannot cancel a
+miss in another trial. Here the measured outcomes were identical across all
+three trials.
 
-The earlier nine broken evasions (EV01–EV09) reached the label-mapping stage
-with combined scores below 0.80, so each avoided the AI label. The reported
-signals show different weak points: EV01, EV05, and EV08 had low model
-scores; EV02 and EV06 had particularly low style scores; EV03, EV04, EV07,
-and EV09 had intermediate signals whose average remained in the unsure band.
-These results show missed detection under the stated evasion rule. Without
-unmodified controls, they do not prove each edit caused a score reduction.
-The broad unsure band also protected all ten genuine human samples from an
-AI accusation in every evaluation trial, so narrowing it would need a new
-false-positive check.
+**Criterion 2 — MISSED. Stages: signal one, signal two, and the combining rule.**
+Signal one measures GPT-2 predictability, not authorship. Across the five AI
+and five human samples, its AI-minus-human mean difference was **-0.03180**:
+on average it ranked these human texts slightly more AI-like. Signal two
+uses sentence-length spread and vocabulary variety as proxies for authorship;
+its mean difference was only **0.05458**. The combining rule weights each at
+0.5, so the gaps partly cancel:
+`0.5 × (-0.03180) + 0.5 × 0.05458 = 0.01139`.
+That is below the required 0.15 in every trial. Changing the label mapping
+cannot fix this score-gap criterion, because labels are assigned afterward.
+The diagnosis is weak separation by the proxy signals, compounded by their
+equal-weight average. More varied labeled samples are needed before choosing
+a different signal or weight; this small run does not establish general accuracy.
+The target remains 0.15.
 
-MF03 failed at input validation and scoring: the route accepted a
-control-character payload containing little meaningful prose; model 0.0
-and style 0.25 averaged to 0.125, which label mapping called human. A
-meaningful-text check or unsupported-input abstention is needed before
-interpreting that score as an authorship judgment. The four bad-input cases
-in criterion 5 passed because they test missing, empty, whitespace-only,
-and oversized strings; they do not cover this separate MF03 weakness.
+**Every broken attack — stage and mechanism**
+
+For EV01–EV09, the common final path is the combining rule followed by label
+mapping: the equal-weight score remained below the AI threshold of 0.80 and
+above the human threshold of 0.20, so the response was `unsure`. Under the
+stated evasion rule, that avoided an AI label and counts as BROKE. None was
+certified human. The table identifies the mechanisms behind those scores.
+Style measurements below were recomputed from the saved CSV inputs using
+`stylometry.py`; model scores are from the recorded attack responses.
+
+| Broken attack | Stage(s) | Mechanism and evidence |
+|---|---|---|
+| EV01 — typos | Signal one; signal two; combining rule | Misspellings can make text less predictable and create distinct word tokens. The recorded model score was 0.1635; vocabulary variety was 0.8706, which the style rule inverts as human-like evidence. Style 0.4843 and model 0.1635 averaged to 0.3239. |
+| EV02 — sentence splitting | Signal two; combining rule | Short inserted sentences make sentence lengths uneven. Measured spread 0.8492 and vocabulary variety 0.8242 produced style 0.1633. Averaging with model 0.5943 gave 0.3788. |
+| EV03 — pasted quotation | Signal two; combining rule | The style rule measures the entire mixed passage without distinguishing the quotation's source. Spread 0.4434 and vocabulary variety 0.8396 yielded style 0.3585; with model 0.6662, the average was 0.51235. |
+| EV04 — unusual vocabulary | Signal one; signal two; combining rule | Rare-word substitution targets the assumption that low predictability means human authorship. It also yielded high vocabulary variety, 0.8721. The recorded model score 0.6114 and style 0.4769 averaged to 0.54415, short of an AI label. The model score alone does not establish that rare words caused a reduction. |
+| EV05 — heavy editing | Signal one; signal two; combining rule | The edited AI-origin passage retains no explicit provenance in either signal: both judge its current surface form. Spread 0.6753 and variety 0.7683 produced style 0.2782; model 0.3212 produced a combined 0.2997. The two low proxy scores reinforce each other. |
+| EV06 — one long and one short sentence | Signal two; combining rule | Spread 1.1859 exceeds the style rule's clipping point of 1, making its sentence-spread component zero. Vocabulary variety 0.75 gives a vocabulary component of 0.25. Their average is style 0.125; combined with model 0.5727, the score is 0.34885. |
+| EV07 — punctuation padding | Signal two; combining rule | Punctuation density has no direct scoring weight. This passage is treated as one word-bearing sentence, so it receives the neutral spread component 0.5 rather than evidence from several sentences. Vocabulary variety 0.7732 produces style 0.3634. With model 0.5862, the average is 0.4748. The mechanism is sentence segmentation and the insufficient-sentence fallback, rather than a direct punctuation-density penalty. |
+| EV08 — short text | Route; signal one; signal two | The route accepts the 65-character passage, and the detector only requires three model tokens. That permits an authorship estimate from just ten recognized words. All ten words are distinct, so the vocabulary component is zero; style is 0.3586. Model 0.2452 produces an average of 0.3019. There is no minimum amount of meaningful prose sufficient for a reliable judgment. |
+| EV09 — human opening on AI text | Signal two; combining rule | The style rule aggregates both sources rather than identifying the AI portion. The combined passage has spread 0.4675 and variety 0.8468, yielding style 0.3428. Averaging with model 0.7042 gives 0.5235. |
+| MF03 — control characters | Route; signal one; signal two; label mapping | Validation checks string type and character length but not whether it contains enough meaningful prose. The payload is 21 characters and passes. The word regex extracts three distinct tokens, including ANSI escape-sequence fragments; with one word-bearing sentence, style becomes 0.25. Model 0.0 and style 0.25 average to 0.125, which maps to a human label even though the input provides insufficient authorship evidence. |
+
+These are code-consistent explanations of the observed outcomes. The run
+did not include unmodified controls, so it cannot prove how much each edit
+changed a score. In particular, EV01 and EV04's model-score changes should
+be tested with paired original/modified inputs before attributing a causal effect.
+
+**Patterns across the failures**
+
+- **Surface form substitutes for authorship.** Signal two treats varied sentence
+  lengths and distinct words as human-like evidence. EV02 and EV06 exploit
+  sentence-length spread; EV01, EV03, EV04, EV05, EV08, and EV09 show the
+  importance of vocabulary variety or mixed passage structure. EV07 exposes
+  the sentence splitter's neutral fallback. These are related weaknesses in
+  one heuristic signal, rather than nine unrelated defects.
+- **The average does not create evidence the signals lack.** Criterion 2 shows
+  weak or reversed group separation; the evasion results show intermediate
+  scores ending in the broad unsure band. Narrowing that band might catch
+  more AI text but would require repeating the false-positive tests, because
+  the same band protected all ten genuine human samples in this run.
+- **Input length does not establish scorable prose.** MF03's definite human
+  label and EV08's short-text estimate show missing evidence-quality checks.
+  Criterion 5 passed all four specified cases, but those cases do not test
+  control-character payloads or meaningful-word minimums.
+
+Four criteria passed, but they do not establish deployment readiness. The
+original allowances of three false accusations in ten, one failed appeal
+in five, and one unsafe invalid-input response in four are permissive.
+Criterion 1 is the first target I would tighten in a future evaluation,
+from at most 3/10 false accusations to at most 1/10 using a broader human
+sample set. That is a proposed future target; the original criteria and
+this run's verdicts remain unchanged.
 
 ---
 
