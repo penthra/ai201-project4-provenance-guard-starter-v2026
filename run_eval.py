@@ -16,15 +16,16 @@ about label coverage needs inputs across the score range.
 !! Three trials, and **your first signal runs a model, so identical input can
 score differently twice.** That's exactly why repeats matter here.
 
-This does the sending and the recording. It does not decide whether a trial
-passed — that depends on the criterion you wrote, so the Verdict column comes
-back blank.
+Runs the fixed criteria in criteria.md, including appeal persistence checks.
+The report calculates all five metrics and requires every trial to pass.
 """
 
 import argparse
 import datetime as dt
 import json
 import sys
+import uuid
+from statistics import mean
 from pathlib import Path
 
 import config
@@ -64,6 +65,95 @@ def describe(body):
         text = body["text"]
         return text[:70] if text else "(empty text)"
     return json.dumps(body)[:120]
+
+
+def request_json(requests, method, url, timeout, **kwargs):
+    """Preserve HTTP status and the actual JSON (or non-JSON error evidence)."""
+    try:
+        response = requests.request(method, url, timeout=timeout, **kwargs)
+    except Exception as exc:
+        return {"status": None, "error": f"{type(exc).__name__}: {exc}"}
+    result = {"status": response.status_code}
+    try:
+        result["response"] = response.json() if response.content else {}
+    except ValueError as exc:
+        result.update(error=f"{type(exc).__name__}: {exc}",
+                      response_text=response.text[:1000])
+    return result
+
+
+def evaluate_submission(requests, scenario, body, url, timeout):
+    """Submit a sample; for appeals, verify both response and saved audit state."""
+    result = request_json(requests, "POST", f"{url}/submit", timeout, json=body)
+    result["sent"] = describe(body)
+    result["creator_id"] = body.get("creator_id")
+    payload = result.get("response", {})
+    if not isinstance(payload, dict):
+        result["error"] = "Expected a JSON object"
+        payload = {}
+    for field in ("content_id", "guess", "confidence", "model_score", "style_score", "label"):
+        result[field] = payload.get(field)
+    if not scenario.get("appeal_reasoning"):
+        return result
+    if result["status"] != 200 or not payload.get("content_id"):
+        result["appeal_passed"] = False
+        return result
+    content_id = payload["content_id"]
+    appeal = request_json(requests, "POST", f"{url}/appeal", timeout,
+                          json={"content_id": content_id,
+                                "reasoning": scenario["appeal_reasoning"]})
+    log = request_json(requests, "GET", f"{url}/log", timeout)
+    log_payload = log.get("response", {})
+    entries = log_payload.get("entries", []) if isinstance(log_payload, dict) else []
+    matching = [e for e in entries if isinstance(e, dict) and e.get("content_id") == content_id]
+    original = any(e.get("status") == "decided" for e in matching)
+    saved = any(e.get("event") == "appeal" and e.get("status") == "under_review"
+                and e.get("creator_id") == body["creator_id"]
+                and e.get("reasoning") == scenario["appeal_reasoning"] for e in matching)
+    appeal_payload = appeal.get("response", {})
+    result.update(appeal=appeal, log_status=log["status"], audit_entries=matching)
+    result["appeal_passed"] = bool(
+        appeal["status"] == 200 and isinstance(appeal_payload, dict)
+        and appeal_payload.get("status") == "under_review"
+        and appeal_payload.get("content_id") == content_id
+        and log["status"] == 200 and original and saved
+        and matching[-1].get("status") == "under_review")
+    return result
+
+
+def trial_metric(scenario, results):
+    """Apply the original numeric targets, without relaxing a missed target."""
+    criterion = scenario["criterion"]
+    if criterion == 5:
+        count = sum(isinstance(r.get("response"), dict)
+                    and r.get("status") == 400
+                    and bool(r["response"].get("error"))
+                    and bool(r["response"].get("message")) for r in results)
+        return f"{count}/4", count >= 3
+    if criterion == 4:
+        count = sum(r.get("appeal_passed", False) for r in results)
+        return f"{count}/5", count >= 4
+    valid = (len(results) == len(scenario["texts"]) and all(
+        r.get("status") == 200 and r.get("guess") in ("ai", "human", "unsure")
+        and isinstance(r.get("confidence"), (int, float))
+        and 0 <= r["confidence"] <= 1 for r in results))
+    if not valid:
+        return "INCOMPLETE (request failure)", False
+    if criterion == 1:
+        count = sum(r["guess"] == "ai" for r in results)
+        return f"{count}/10", count <= 3
+    if criterion == 2:
+        ai = [r["confidence"] for r in results if r["origin"] == "ai"]
+        human = [r["confidence"] for r in results if r["origin"] == "human"]
+        gap = mean(ai) - mean(human)
+        return f"{gap:.5f} (AI {mean(ai):.5f}; human {mean(human):.5f})", gap >= 0.15
+    count = len({r["guess"] for r in results})
+    return f"{count}/3", count == 3
+
+
+TARGETS = {1: "<= 3/10 flagged AI", 2: "AI mean - human mean >= 0.15",
+           3: "3/3 labels in 15 texts", 4: ">= 4/5 appeals saved and under review",
+           5: ">= 3/4 clear errors without crashes"}
 
 
 def main():
@@ -106,6 +196,7 @@ def main():
     if args.trials < 3:
         print(f"!! {args.trials} trial(s). The submission asks for three.\n")
 
+    run_id = uuid.uuid4().hex[:10]
     rows = []
     for scenario in scenarios.SCENARIOS:
         print(f"\n{scenario['name']}  (criterion {scenario.get('criterion') or '—'})")
@@ -114,23 +205,14 @@ def main():
         for trial in range(1, args.trials + 1):
             results = []
             for i, body in enumerate(bodies_for(scenario), 1):
-                preview = describe(body)
-                try:
-                    response = requests.post(f"{args.url}/submit", json=body,
-                                             timeout=args.timeout)
-                    payload = response.json() if response.content else {}
-                    results.append({
-                        "status": response.status_code,
-                        "guess": payload.get("guess"),
-                        "confidence": payload.get("confidence"),
-                        "model_score": payload.get("model_score"),
-                        "style_score": payload.get("style_score"),
-                        "label": payload.get("label"),
-                        "sent": preview,
-                    })
-                except Exception as exc:  # noqa: BLE001
-                    results.append({"status": None, "error": f"{type(exc).__name__}: {exc}",
-                                    "sent": preview})
+                # Isolate each scenario/sample within this evaluation run. Each
+                # creator is reused across trials (only three submits, below 8/min).
+                body = dict(body)
+                body["creator_id"] = f"eval_{run_id}_c{scenario['criterion']}_{i}"
+                result = evaluate_submission(requests, scenario, body, args.url, args.timeout)
+                if scenario.get("origins"):
+                    result["origin"] = scenario["origins"][i - 1]
+                results.append(result)
 
             trials.append(results)
             guesses = [r.get("guess") or "—" for r in results]
@@ -158,8 +240,8 @@ def write_report(rows, args):
         "- Service: `app.py::submit` · scoring: `scoring.py::combine_signals`",
         f"- {n} trials per criterion · {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}",
         "",
-        "Fill in Target from `criteria.md`, and Run and Verdict from the output",
-        "underneath. Whether a trial passed depends on the criterion you wrote.",
+        "Targets are the five original criteria in `criteria.md`.",
+        "MET requires all three trials to meet the target; failures are retained.",
         "",
         f"| Criterion | Target | {headers} | Verdict |",
         f"|---|---|{divider}|---|",
@@ -169,7 +251,10 @@ def write_report(rows, args):
         scenario = row["scenario"]
         number = scenario.get("criterion")
         name = f"{number}. {scenario['name']}" if number else scenario["name"]
-        lines.append(f"| {name} |  | {' | '.join([' '] * n)} |  |")
+        metrics = [trial_metric(scenario, results) for results in row["trials"]]
+        verdict = "MET" if all(passed for _, passed in metrics) else "MISSED"
+        lines.append(f"| {name} | {TARGETS[number]} | " +
+                     " | ".join(value for value, _ in metrics) + f" | {verdict} |")
 
     lines += ["", "---", "", "## What actually came back", "",
               "Real output. Paste the relevant parts into your README — the rubric",
@@ -183,6 +268,7 @@ def write_report(rows, args):
                       json.dumps(results, indent=2), "```", ""]
 
     path.write_text("\n".join(lines), encoding="utf-8")
+    path.with_suffix(".json").write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\nWrote {path.relative_to(config.ROOT)}")
     print("Commit it. It's the evidence the test actually happened.")
 
